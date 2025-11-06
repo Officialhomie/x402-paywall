@@ -1,0 +1,247 @@
+
+---
+
+# 🩺 x402 Micro-Consultation Paywall (Proof of Concept)
+
+This project demonstrates how to build a **pay-per-access endpoint** using the **x402 Payment Required** standard on **Base Sepolia**, accepting **USDC** payments through an **x402 facilitator**.
+It’s ideal for micro-consultations, digital content access, or subscription previews.
+
+---
+
+## 📘 Overview
+
+* **Network:** Base Sepolia (testnet) — `chainId 84532`
+* **Token:** USDC (Testnet, Circle faucet token)
+* **Payment Model:** x402 HTTP 402 “Payment Required” responses + facilitator verification
+* **Backend:** Express server
+* **Frontend:** Any JS client (e.g., React) that can handle HTTP 402 and retry with `X-PAYMENT`
+* **Facilitator Library:** `@coinbase/x402` (official npm package)
+
+---
+
+## 🚀 Getting Started
+
+### 1. Install Dependencies
+
+```bash
+mkdir x402-paywall && cd x402-paywall
+npm init -y
+npm install express dotenv cors ethers @coinbase/x402
+```
+
+---
+
+### 2. Configure Environment Variables
+
+Create `.env` in the project root:
+
+```bash
+RPC_URL=https://sepolia.base.org
+MERCHANT_ADDRESS=0xYourMerchantWallet
+USDC_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+PORT=3000
+```
+
+**Notes**
+
+* The USDC address above is the official Circle USDC token for Base Sepolia.
+* `MERCHANT_ADDRESS` is where you’ll receive USDC payments.
+* `RPC_URL` should be a Base Sepolia RPC endpoint (Alchemy, Infura, etc.).
+
+---
+
+### 3. Create Server File
+
+Create `server.js` and add:
+
+```js
+import express from "express";
+import dotenv from "dotenv";
+import { verifyPayment } from "@coinbase/x402";
+
+dotenv.config();
+const app = express();
+app.use(express.json());
+
+/**
+ * GET /premium
+ * - Returns a 402 Payment Required if no valid X-PAYMENT header is present
+ * - Verifies payment if provided
+ */
+app.get("/premium", async (req, res) => {
+  const xpay = req.header("x-payment");
+
+  if (!xpay) {
+    // Respond 402 with Payment Requirements for client to pay
+    const paymentRequirement = {
+      scheme: "exact",
+      network: "base:84532",
+      token: process.env.USDC_ADDRESS,
+      recipient: process.env.MERCHANT_ADDRESS,
+      amount: 100000 // 0.1 USDC (USDC has 6 decimals)
+    };
+
+    return res.status(402).json({
+      message: "Payment required to access this resource.",
+      payment: paymentRequirement
+    });
+  }
+
+  try {
+    // Verify the payment using the facilitator SDK
+    const verified = await verifyPayment(xpay);
+    if (!verified) throw new Error("Payment invalid");
+
+    return res.status(200).json({
+      access: "granted",
+      content: "https://example.com/consultation-video.mp4"
+    });
+  } catch (err) {
+    return res.status(402).json({ error: err.message });
+  }
+});
+
+app.listen(process.env.PORT, () => {
+  console.log(`Server running on http://localhost:${process.env.PORT}`);
+});
+```
+
+---
+
+### 4. Running the Server
+
+```bash
+node server.js
+```
+
+Visit [http://localhost:3000/premium](http://localhost:3000/premium).
+You’ll receive an HTTP `402 Payment Required` response containing the required payment details.
+
+---
+
+### 5. Client Flow Example
+
+```js
+// simple client fetch pattern
+const res = await fetch("http://localhost:3000/premium");
+if (res.status === 402) {
+  const data = await res.json();
+  const { payment } = data;
+
+  // Display payment info & build a transaction via wallet (USDC -> merchant)
+  console.log("Need to pay:", payment.amount, "to", payment.recipient);
+  
+  // ...after payment, get signed payment receipt...
+  const xPaymentHeader = "<signed-payload>";
+
+  const retry = await fetch("http://localhost:3000/premium", {
+    headers: { "X-PAYMENT": xPaymentHeader }
+  });
+
+  const content = await retry.json();
+  console.log(content);
+}
+```
+
+---
+
+### 6. Testing on Base Sepolia
+
+#### Get Test Tokens
+
+* **ETH (Faucet):** [Base Sepolia Faucet](https://docs.base.org/docs/tools/faucet) or Alchemy/Infura faucets
+* **USDC (Faucet):** Use the Circle Testnet Faucet to mint USDC to your wallet
+
+#### Chain Details
+
+| Network      | RPC                        | Chain ID |
+| ------------ | -------------------------- | -------- |
+| Base Sepolia | `https://sepolia.base.org` | 84532    |
+
+---
+
+## ⚙️ Facilitator Options
+
+### Hosted Facilitator (Recommended for POC)
+
+Use the Coinbase facilitator directly via the `@coinbase/x402` SDK.
+This simplifies verification and settlement — no need to broadcast transactions manually.
+
+### Self-Hosted Facilitator (For Full Control)
+
+Run a local facilitator service using the open-source x402 server example.
+Implements `/verify`, `/settle`, `/supported` endpoints and lets you retain ownership of payment logic.
+
+---
+
+## 🧪 Integration Testing
+
+### Simulate HTTP 402 Response
+
+```bash
+curl -i http://localhost:3000/premium
+```
+
+### Send Verified Payment
+
+```bash
+curl -H "X-PAYMENT: <signed-payload>" http://localhost:3000/premium
+```
+
+If the payment is valid, you’ll receive:
+
+```json
+{
+  "access": "granted",
+  "content": "https://example.com/consultation-video.mp4"
+}
+```
+
+---
+
+## 🔐 Security & Best Practices
+
+* Keep `.env` out of source control.
+* Validate facilitator responses server-side before unlocking any resource.
+* For real content or health data, store securely (off-chain) and only return signed URLs post-verification.
+* Use HTTPS in production.
+* Run automated tests for the `verifyPayment` path to avoid bypass issues.
+
+---
+
+## 📦 Next Steps
+
+1. Add a frontend button to initiate payment and resend the request with `X-PAYMENT`.
+2. Optionally deploy a `PaymentSplitter` contract for doctor revenue sharing.
+3. Integrate role-based access if reusing this for healthcare creator dashboards.
+
+---
+
+## 🧾 Reference Data
+
+| Key                   | Value                                        |
+| --------------------- | -------------------------------------------- |
+| Base Sepolia Chain ID | 84532                                        |
+| Base Sepolia RPC      | `https://sepolia.base.org`                   |
+| Test USDC Address     | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| Payment Decimals      | 6                                            |
+| Test Payment Amount   | 0.1 USDC = 100000 atomic units               |
+
+---
+
+## ✅ Checklist Before Testing
+
+* [ ] Node and npm installed
+* [ ] Base Sepolia network added to MetaMask (84532)
+* [ ] ETH + USDC test tokens available
+* [ ] Server running locally (`node server.js`)
+* [ ] Facilitator integration tested with `@coinbase/x402`
+
+---
+
+**End of Documentation**
+File suggested path: `docs/x402-setup.md`
+
+---
+
+Would you like me to include a **section with helper scripts** (npm scripts and test commands) at the end — e.g. `"start"`, `"dev"`, and a `"verify:test"` command stub — so it’s immediately runnable from `package.json`?
