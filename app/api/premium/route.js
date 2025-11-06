@@ -186,21 +186,15 @@ export async function GET(request) {
       }
     };
 
-    // Return HTTP 402 Payment Required
-    // Status code 402 is the standard for payment-required responses
-    // The client should parse this and show payment UI
+    // Return HTTP 402 Payment Required in x402 standard format
+    // The Thirdweb API expects payment requirements at the root level, not nested
+    // This follows the x402 specification for 402 responses
     return NextResponse.json(
       {
-        message: 'Payment required to access this resource.',
+        x402Version: 1,
+        ...paymentRequirement.x402Requirements, // Spread x402Requirements at root level for Thirdweb API
+        // Also include the full payment object for backward compatibility with our frontend
         payment: paymentRequirement,
-        // Helpful instructions for the client
-        instructions: {
-          step1: 'Connect your wallet to Base Sepolia network',
-          step2: 'Ensure you have USDC test tokens',
-          step3: 'Approve and send payment transaction',
-          step4: 'Get payment proof from facilitator',
-          step5: 'Retry request with X-PAYMENT header'
-        }
       },
       { status: 402 } // HTTP 402 Payment Required
     );
