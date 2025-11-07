@@ -185,241 +185,87 @@ export default function Home() {
         throw new Error('Wallet client not available. Please try connecting your wallet again.');
       }
 
-      // STEP 4: Use Thirdweb's x402/fetch API endpoint
-      // This is the recommended approach per the working example
-      // It handles the entire flow: authorization creation, transaction settlement, and retry
-      // 
-      // NOTE: Thirdweb's API requires a secret key. For client-side, we'd need to expose it
-      // or use a proxy endpoint. For now, let's try the alternative: use createPaymentHeader
-      // but ensure we use the same facilitator that the server uses.
-      
-      // ALTERNATIVE APPROACH: Use Thirdweb's API endpoint via a proxy
-      // We can create a Next.js API route that calls Thirdweb's endpoint
-      // This keeps the secret key server-side
-      
+      // STEP 4: Create payment authorization using x402/client
       setStep(4);
-      
-      console.log('🔍 Attempting to use Thirdweb x402/fetch API...');
-      
-      // Try using Thirdweb's API endpoint via our own proxy
-      // This matches the working example's approach
-      // NOTE: Thirdweb's API cannot access localhost URLs directly
-      // So we need to skip this for local development and go straight to fallback
-      const resourceUrl = paymentInfo.x402Requirements?.resource || '/api/premium';
-      const fullResourceUrl = resourceUrl.startsWith('http') 
-        ? resourceUrl 
-        : `${window.location.origin}${resourceUrl}`;
-      
-      // Check if we're on localhost - Thirdweb API can't access localhost
-      const isLocalhost = fullResourceUrl.includes('localhost') || fullResourceUrl.includes('127.0.0.1');
-      
-      if (isLocalhost) {
-        console.log('⚠️ Localhost detected - Thirdweb API cannot access localhost URLs');
-        console.log('Skipping Thirdweb API and using createPaymentHeader fallback');
-        throw new Error('Localhost not supported by Thirdweb API - using fallback');
+
+      // Validate payment requirements
+      if (!paymentInfo.x402Requirements) {
+        throw new Error('Payment requirements not found in API response.');
       }
-      
-      console.log('Calling Thirdweb x402/fetch API via proxy:', fullResourceUrl);
-      console.log('Wallet address:', address);
-      
-      // Call our proxy endpoint that will use Thirdweb's API
-      // This keeps the secret key server-side
-      const thirdwebProxyResponse = await fetch('/api/x402-fetch', {
-        method: 'POST',
+
+      // CRITICAL: Use the EXACT network format from the 402 response
+      // Do NOT convert it! The facilitator expects the exact same format
+      // that was sent in the 402 response (e.g., "eip155:8453")
+      const paymentRequirements = { ...paymentInfo.x402Requirements };
+
+      console.log('Creating payment with requirements:', JSON.stringify(paymentRequirements, null, 2));
+
+      // Use x402.org facilitator for creating the payment
+      const facilitatorUrl = 'https://x402.org/facilitator';
+
+      console.log('Facilitator URL:', facilitatorUrl);
+      console.log('Network:', paymentRequirements.network);
+
+      if (!paymentRequirements.resource) {
+        throw new Error('Payment requirements missing resource field.');
+      }
+
+      // Create payment header using x402/client
+      // This creates an EIP-3009 authorization signature
+      const paymentHeader = await createPaymentHeader(
+        walletClient,
+        1, // x402Version
+        paymentRequirements,
+        { facilitatorUrl }
+      );
+
+      console.log('✅ Payment header created (length):', paymentHeader.length);
+
+      // STEP 5: Send to server for verification and settlement
+      console.log('Sending payment header to backend for verification...');
+      const response = await fetch('/api/premium', {
         headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          url: fullResourceUrl,
-          method: 'GET',
-          from: address,
-        }),
-      });
-      
-      if (thirdwebProxyResponse.ok) {
-        // Payment successful! Thirdweb API already handled the payment and returned the result
-        const purchaseData = await thirdwebProxyResponse.json();
-        console.log('✅ Payment successful via Thirdweb API!', purchaseData);
-        
-        // The Thirdweb API returns the purchase result directly
-        // We can extract the video/content from the response
-        if (purchaseData.purchaseDetails || purchaseData.data) {
-          // Payment was successful, but we still need to fetch the actual video
-          // The API should have already settled the transaction
-          // Now we can fetch the video with the payment header
-          const paymentHeader = purchaseData.paymentHeader || purchaseData.xPayment;
-          
-          if (paymentHeader) {
-            const videoResponse = await fetch('/api/premium', {
-              headers: {
-                'X-PAYMENT': paymentHeader,
-              }
-            });
-            
-            if (videoResponse.ok) {
-              const contentType = videoResponse.headers.get('content-type');
-              if (contentType && contentType.includes('video/mp4')) {
-                const videoBlob = await videoResponse.blob();
-                const videoUrl = URL.createObjectURL(videoBlob);
-                setContent({
-                  access: 'granted',
-                  videoUrl: videoUrl,
-                  contentType: 'video',
-                  message: 'Payment verified! Video access granted.',
-                  transactionId: purchaseData.transactionId || purchaseData.purchaseDetails?.transactionId,
-                  timestamp: new Date().toISOString(),
-                });
-                setStatus('success');
-                setStep(5);
-                return;
-              }
-            }
-          }
+          'X-PAYMENT': paymentHeader
         }
-        
-        // If we get here, the payment was successful but we need to handle it differently
+      });
+
+      console.log('Backend response status:', response.status);
+
+      if (response.ok) {
+        // Payment verified! Access granted - expect video response
+        const contentType = response.headers.get('content-type');
+
+        if (!contentType || !contentType.includes('video/mp4')) {
+          throw new Error('Expected video response but received: ' + contentType);
+        }
+
+        // Video file - create blob URL for playback
+        const videoBlob = await response.blob();
+        const videoUrl = URL.createObjectURL(videoBlob);
         setContent({
           access: 'granted',
-          message: 'Payment successful! Transaction ID: ' + (purchaseData.transactionId || 'N/A'),
-          transactionId: purchaseData.transactionId,
+          videoUrl: videoUrl,
+          contentType: 'video',
+          message: 'Payment verified! Video access granted.',
           timestamp: new Date().toISOString(),
         });
         setStatus('success');
         setStep(5);
-        return;
-      } else if (thirdwebProxyResponse.status === 402) {
-        // Funding required - Thirdweb API returned 402
-        const fundingData = await thirdwebProxyResponse.json();
-        console.log('💰 Payment required (402):', fundingData);
-        
-        // The API might return funding information
-        if (fundingData.fundingLink || fundingData.link) {
-          setError(`Insufficient balance. Please fund your wallet: ${fundingData.fundingLink || fundingData.link}`);
-        } else {
-          setError('Payment required. Please ensure your wallet has sufficient USDC balance.');
-        }
+      } else if (response.status === 402) {
+        // Payment verification failed
+        const data = await response.json();
+        console.error('=== PAYMENT VERIFICATION FAILED (402 Response) ===');
+        console.error('Server response:', JSON.stringify(data, null, 2));
+
+        setError(data.errorMessage || data.message || 'Payment verification failed');
         setStatus('error');
-        return;
       } else {
-        // API error - fall through to fallback
-        const errorData = await thirdwebProxyResponse.json().catch(() => ({}));
-        console.log('⚠️ Thirdweb API proxy returned error, falling back...', errorData);
-        throw new Error(errorData.message || 'Thirdweb API error');
+        throw new Error(`Unexpected status: ${response.status}`);
       }
-    } catch (apiError) {
-      // FALLBACK: Use createPaymentHeader if Thirdweb API is not available
-      console.log('Using fallback: createPaymentHeader from x402/client');
-      console.log('Error from Thirdweb API:', apiError.message);
-      
-      try {
-        // STEP 4 (Fallback): Build payment requirements from the 402 response
-        if (!paymentInfo.x402Requirements) {
-          throw new Error('Payment requirements not found in API response.');
-        }
-        
-        // CRITICAL: createPaymentHeader from x402/client expects 'base' or 'base-sepolia'
-        // NOT 'eip155:8453' format. Convert the network format.
-        const paymentRequirements = { ...paymentInfo.x402Requirements };
-        
-        // Convert network from EIP-155 format to x402/client format
-        if (paymentRequirements.network === 'eip155:8453' || paymentRequirements.network?.includes('8453')) {
-          paymentRequirements.network = 'base';
-        } else if (paymentRequirements.network === 'eip155:84532' || paymentRequirements.network?.includes('84532')) {
-          paymentRequirements.network = 'base-sepolia';
-        }
-        
-        console.log('Using x402Requirements from API (converted network format):', paymentRequirements);
-        
-        setStep(4);
-        
-        // Use x402.org facilitator - it should work for creating the payment
-        const facilitatorUrl = 'https://x402.org/facilitator';
-        
-        console.log('Creating payment header with requirements:', JSON.stringify(paymentRequirements, null, 2));
-        console.log('Facilitator URL:', facilitatorUrl);
-        console.log('Network format for createPaymentHeader:', paymentRequirements.network);
-        
-        if (!paymentRequirements.resource) {
-          throw new Error('Payment requirements missing resource field.');
-        }
-        
-        // Create payment header using x402/client
-        // NOTE: This creates an authorization, but the transaction settlement
-        // should happen when the server calls settlePayment
-        const paymentHeader = await createPaymentHeader(
-          walletClient,
-          1, // x402Version
-          paymentRequirements,
-          { facilitatorUrl }
-        );
-        
-        console.log('✅ Payment header created (length):', paymentHeader.length);
-        
-        // STEP 6: Send to server for verification and settlement
-        console.log('Sending payment header to backend for verification...');
-        const response = await fetch('/api/premium', {
-          headers: {
-            'X-PAYMENT': paymentHeader
-          }
-        });
-
-        console.log('Backend response status:', response.status);
-        
-        if (response.ok) {
-          // Payment verified! Access granted - expect video response
-          const contentType = response.headers.get('content-type');
-          
-          if (!contentType || !contentType.includes('video/mp4')) {
-            throw new Error('Expected video response but received: ' + contentType);
-          }
-          
-          // Video file - create blob URL for playback
-          const videoBlob = await response.blob();
-          const videoUrl = URL.createObjectURL(videoBlob);
-          setContent({
-            access: 'granted',
-            videoUrl: videoUrl,
-            contentType: 'video',
-            message: 'Payment verified! Video access granted.',
-            timestamp: new Date().toISOString(),
-          });
-          setStatus('success');
-          setStep(5);
-        } else if (response.status === 402) {
-          // Payment verification failed
-          const data = await response.json();
-          console.error('=== PAYMENT VERIFICATION FAILED (402 Response) ===');
-          console.error('Server response:', JSON.stringify(data, null, 2));
-
-          // Build detailed error message
-          let errorMessage = data.message || 'Payment verification failed';
-          if (data.invalidReason) {
-            errorMessage += `\n\nReason: ${data.invalidReason}`;
-          }
-          if (data.serverDiagnostics) {
-            errorMessage += `\n\nServer Diagnostics:`;
-            errorMessage += `\n- Settlement attempted: ${data.serverDiagnostics.settlementAttempted}`;
-            errorMessage += `\n- Was settled: ${data.serverDiagnostics.wasSettled}`;
-            errorMessage += `\n- Facilitator: ${data.serverDiagnostics.facilitatorUsed}`;
-          }
-          if (data.debug) {
-            errorMessage += `\n\nDebug Info:`;
-            errorMessage += `\n- Payment network: ${data.debug.paymentNetwork}`;
-            errorMessage += `\n- Expected network: ${data.debug.requirementsNetwork}`;
-            errorMessage += `\n- Resource: ${data.debug.expectedResource}`;
-          }
-
-          setError(errorMessage);
-          setStatus('error');
-        } else {
-          throw new Error(`Unexpected status: ${response.status}`);
-        }
-      } catch (fallbackError) {
-        // If fallback also fails, use the original error
-        setError(apiError.message || fallbackError.message || 'An error occurred during payment processing');
-        setStatus('error');
-        console.error('Error in fallback payment processing:', fallbackError);
-      }
+    } catch (error) {
+      setError(error.message || 'An error occurred during payment processing');
+      setStatus('error');
+      console.error('Error in payment processing:', error);
     }
   };
 

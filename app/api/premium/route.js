@@ -82,9 +82,7 @@
  */
 
 import { NextResponse } from 'next/server';
-import { facilitator, settlePayment } from 'thirdweb/x402';
-import { createThirdwebClient } from 'thirdweb';
-import { base, baseSepolia } from 'thirdweb/chains';
+import { decodePayment } from 'x402/schemes';
 import fs from 'fs';
 import path from 'path';
 
@@ -202,17 +200,30 @@ export async function GET(request) {
 
   // STEP 3: Payment header is present - verify it
   try {
-    // CRITICAL FIX: DO NOT decode the payment header before passing to settlePayment!
-    // The settlePayment function expects the RAW base64-encoded string from X-PAYMENT header.
-    // Decoding it here corrupts the signature and causes "invalid_exact_evm_payload_signature" error.
-    //
-    // Reference implementation (402-agent-commerce) passes paymentData directly without decoding.
-    //
-    // REMOVED: let paymentPayload = decodePayment(xPaymentHeader);
-    // The paymentData should be passed AS-IS to settlePayment
+    // Decode the payment payload from the X-PAYMENT header
+    const paymentPayload = decodePayment(xPaymentHeader);
+
+    console.log('=== PAYMENT VERIFICATION ===');
+    console.log('Payment Network:', paymentPayload.network);
+    console.log('Payment Scheme:', paymentPayload.scheme);
+    console.log('Merchant Address:', MERCHANT_ADDRESS);
+    console.log('Payment Amount:', PAYMENT_AMOUNT);
+
+    // Validate environment configuration
+    if (!MERCHANT_ADDRESS || MERCHANT_ADDRESS === '0x0000000000000000000000000000000000000000') {
+      console.error('❌ MERCHANT_ADDRESS is not set or invalid');
+      return NextResponse.json(
+        {
+          error: 'Configuration error',
+          message: 'MERCHANT_ADDRESS must be configured.',
+        },
+        { status: 500 }
+      );
+    }
 
     // Determine network configuration
-    const isMainnetForVerification = NETWORK === 'base' || NETWORK === 'base:8453';
+    const isMainnet = NETWORK === 'base' || NETWORK === 'base:8453';
+    const usdcAddress = isMainnet ? USDC_ADDRESSES['base'] : USDC_ADDRESSES['base-sepolia'];
 
     // Build resource URL from request
     let resourceUrl;
@@ -224,156 +235,74 @@ export async function GET(request) {
     }
     resourceUrl = resourceUrl.replace(/\/$/, '');
 
-    console.log('=== SETTLEMENT PARAMETERS ===');
-    console.log('Resource URL:', resourceUrl);
-    console.log('Merchant Address:', MERCHANT_ADDRESS);
-    console.log('Network:', isMainnetForVerification ? 'Base Mainnet' : 'Base Sepolia');
-    console.log('Payment Amount:', PAYMENT_AMOUNT);
-
-    // Use Thirdweb facilitator to verify and settle the payment
-    // Thirdweb facilitator requires:
-    // - THIRDWEB_SECRET_KEY: Your Thirdweb secret key
-    // - MERCHANT_ADDRESS: Your server wallet address (where payments are received)
-    
-    const thirdwebSecretKey = process.env.THIRDWEB_SECRET_KEY;
-    
-    if (!thirdwebSecretKey) {
-      console.error('❌ THIRDWEB_SECRET_KEY is not set in environment variables');
-      return NextResponse.json(
-        {
-          error: 'Facilitator configuration error',
-          message: 'Thirdweb facilitator requires THIRDWEB_SECRET_KEY to be set.',
-        },
-        { status: 500 }
-      );
-    }
-
-    if (!MERCHANT_ADDRESS || MERCHANT_ADDRESS === '0x0000000000000000000000000000000000000000') {
-      console.error('❌ MERCHANT_ADDRESS is not set or invalid');
-      return NextResponse.json(
-        {
-          error: 'Facilitator configuration error',
-          message: 'MERCHANT_ADDRESS (server wallet address) must be set for Thirdweb facilitator.',
-        },
-        { status: 500 }
-      );
-    }
-
-    console.log('Facilitator configuration:', {
-      hasSecretKey: !!thirdwebSecretKey,
-      secretKeyLength: thirdwebSecretKey?.length || 0,
-      merchantAddress: MERCHANT_ADDRESS,
-      network: NETWORK,
-      isMainnet: NETWORK === 'base' || NETWORK === 'base:8453'
-    });
-
-    // Create Thirdweb client
-    const thirdwebClient = createThirdwebClient({
-      secretKey: thirdwebSecretKey,
-    });
-
-    // Create Thirdweb facilitator
-    // The facilitator uses the server wallet address (MERCHANT_ADDRESS) to settle payments
-    // CRITICAL: The facilitator will use the merchant wallet to pay gas fees and execute the transfer
-    // The merchant wallet needs to have ETH for gas, and will receive USDC from the buyer
-    const thirdwebFacilitator = facilitator({
-      client: thirdwebClient,
-      serverWalletAddress: MERCHANT_ADDRESS,
-      waitUntil: 'confirmed', // Wait for transaction confirmation before returning
-    });
-
-    console.log('✅ Thirdweb facilitator configured');
-    console.log('Facilitator will settle transactions using merchant wallet:', MERCHANT_ADDRESS);
-    console.log('NOTE: Merchant wallet needs ETH for gas fees to execute USDC transfers');
-
-    // Determine the Thirdweb chain object based on network
-    const thirdwebChain = isMainnetForVerification ? base : baseSepolia;
-
-    // Convert price from smallest units to dollar string format (e.g., "$0.10")
-    // USDC has 6 decimals, so divide by 1000000
-    const priceInDollars = (PAYMENT_AMOUNT / 1000000).toFixed(2);
-    const priceString = `$${priceInDollars}`;
-
-    console.log('=== SETTLING PAYMENT WITH THIRDWEB ===');
-    console.log('Parameters:', {
-      resourceUrl,
-      method: 'GET',
+    // Build payment requirements that match what was sent in the 402 response
+    const paymentRequirements = {
+      scheme: 'exact',
+      network: paymentPayload.network, // Use network from payment payload
+      asset: usdcAddress,
       payTo: MERCHANT_ADDRESS,
-      network: thirdwebChain.name,
-      price: priceString,
+      maxAmountRequired: PAYMENT_AMOUNT.toString(),
+      resource: resourceUrl,
+      description: 'Access to premium video content',
+      mimeType: 'video/mp4',
+      maxTimeoutSeconds: 86400,
+      extra: {
+        name: 'USD Coin',
+        version: '2',
+        primaryType: 'TransferWithAuthorization',
+        recipientAddress: MERCHANT_ADDRESS,
+      }
+    };
+
+    // Use the facilitator to verify and settle payment
+    // Default to x402.org facilitator
+    const facilitatorUrl = process.env.FACILITATOR_URL || 'https://x402.org/facilitator';
+
+    console.log('Using facilitator:', facilitatorUrl);
+    console.log('Payment requirements:', JSON.stringify(paymentRequirements, null, 2));
+
+    // Call facilitator /settle endpoint
+    // This combines verification and settlement in one call
+    const facilitatorResponse = await fetch(`${facilitatorUrl}/settle`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        x402Version: paymentPayload.x402Version || 1,
+        paymentPayload: paymentPayload,
+        paymentRequirements: paymentRequirements,
+      }),
     });
 
-    let settlementResult;
-    try {
-      // Thirdweb's settlePayment handles both settlement and verification
-      // It extracts requirements from paymentData automatically
-      // Match the working example: use routeConfig for metadata
-      settlementResult = await settlePayment({
-        resourceUrl: resourceUrl,
-        method: 'GET',
-        paymentData: xPaymentHeader,
-        payTo: MERCHANT_ADDRESS,
-        network: thirdwebChain,
-        price: priceString,
-        routeConfig: {
-          description: 'Access to premium video content',
-          mimeType: 'video/mp4',
-          outputSchema: {
-            contentType: 'video',
-            access: 'granted'
-          }
-        },
-        facilitator: thirdwebFacilitator,
-      });
-      
-      console.log('✅ Settlement completed:', {
-        status: settlementResult.status,
-        hasResponseBody: !!settlementResult.responseBody,
-        responseHeaders: settlementResult.responseHeaders,
-        paymentReceipt: settlementResult.paymentReceipt,
-      });
-      
-      // Log transaction details if settlement was successful
-      if (settlementResult.status === 200 && settlementResult.paymentReceipt) {
-        console.log('💰 Payment transaction settled:', {
-          transactionHash: settlementResult.paymentReceipt.transaction,
-          from: settlementResult.paymentReceipt.from,
-          to: settlementResult.paymentReceipt.to,
-          amount: settlementResult.paymentReceipt.amount,
-        });
-      }
-    } catch (settleError) {
-      console.error('=== SETTLEMENT ERROR ===');
-      console.error('Error message:', settleError.message);
-      console.error('Error stack:', settleError.stack);
+    const facilitatorData = await facilitatorResponse.json();
+
+    console.log('Facilitator response status:', facilitatorResponse.status);
+    console.log('Facilitator response:', JSON.stringify(facilitatorData, null, 2));
+
+    // Check if settlement was successful
+    if (!facilitatorResponse.ok || !facilitatorData.success) {
+      console.error('=== PAYMENT SETTLEMENT FAILED ===');
+      console.error('Facilitator returned error:', facilitatorData);
 
       return NextResponse.json(
         {
-          error: 'Payment settlement error',
-          message: settleError.message || 'Failed to settle payment with Thirdweb facilitator.',
-          hint: 'The payment may be invalid or the facilitator service may be unavailable.',
+          x402Version: 1,
+          error: facilitatorData.errorReason || 'payment_settlement_failed',
+          errorMessage: facilitatorData.errorReason || 'Payment settlement failed. Please try again.',
+          accepts: [paymentRequirements],
         },
         { status: 402 }
       );
     }
 
-    // Check settlement result
-    if (settlementResult.status !== 200) {
-      console.error('=== PAYMENT SETTLEMENT FAILED ===');
-      console.error('Settlement status:', settlementResult.status);
-      console.error('Response body:', JSON.stringify(settlementResult.responseBody, null, 2));
-
-      // Return the error response from settlePayment
-      return NextResponse.json(
-        settlementResult.responseBody || {
-          error: 'Payment verification failed',
-          message: 'The payment proof is invalid or does not match the requirements.',
-        },
-        {
-          status: settlementResult.status,
-          headers: settlementResult.responseHeaders || {}
-        }
-      );
+    // Payment verified and settled successfully!
+    console.log('✅ Payment verified and settled!');
+    if (facilitatorData.transaction) {
+      console.log('Transaction hash:', facilitatorData.transaction);
+    }
+    if (facilitatorData.payer) {
+      console.log('Payer address:', facilitatorData.payer);
     }
 
     // STEP 5: Payment is valid! Grant access to protected content
