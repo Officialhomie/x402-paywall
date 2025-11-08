@@ -298,20 +298,30 @@ export async function GET(request) {
     });
 
     // Use Thirdweb's settlePayment function
-    const result = await settlePayment({
-      resourceUrl: paymentConfig.resourceUrl,
-      method: 'GET',
-      paymentData: xPaymentHeader,
-      payTo: MERCHANT_ADDRESS,
-      network: chain,
-      price: priceString,
-      facilitator: thirdwebFacilitator,
-      routeConfig: {
-        description: PAYMENT_DESCRIPTION,
-        mimeType: PAYMENT_MIME_TYPE,
-        maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
-      },
-    });
+    let result;
+    try {
+      result = await settlePayment({
+        resourceUrl: paymentConfig.resourceUrl,
+        method: 'GET',
+        paymentData: xPaymentHeader,
+        payTo: MERCHANT_ADDRESS,
+        network: chain,
+        price: priceString,
+        facilitator: thirdwebFacilitator,
+        routeConfig: {
+          description: PAYMENT_DESCRIPTION,
+          mimeType: PAYMENT_MIME_TYPE,
+          maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
+        },
+      });
+    } catch (settlementError) {
+      console.error('❌ Settlement error details:', {
+        message: settlementError.message,
+        stack: settlementError.stack,
+        name: settlementError.name,
+      });
+      throw settlementError; // Re-throw to be caught by outer try-catch
+    }
 
     console.log('Settlement result status:', result.status);
 
