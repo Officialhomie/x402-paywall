@@ -351,7 +351,7 @@ export async function GET(request) {
     // - Payment proof is valid and verified by facilitator
     // 
     // Now we can safely return the protected video resource
-    const videoRelativePath = process.env.VIDEO_PATH || path.join('resources ', 'ssstik.io_@wilcoxxspace_1761512614937.mp4');
+    const videoRelativePath = process.env.VIDEO_PATH || path.join('resources', 'ssstik.io_@wilcoxxspace_1761512614937.mp4');
     
     try {
       // Get the absolute path to the video file
