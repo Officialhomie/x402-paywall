@@ -92,6 +92,10 @@ import path from 'path';
 // This is where you'll receive USDC payments
 const MERCHANT_ADDRESS = process.env.MERCHANT_ADDRESS || '0x0000000000000000000000000000000000000000';
 
+// Server wallet address (funded with ETH) used by Thirdweb facilitator for settlements
+// This wallet is controlled by Thirdweb and executes the settlement transactions
+const SERVER_WALLET_ADDRESS = process.env.SERVER_WALLET_ADDRESS || MERCHANT_ADDRESS;
+
 // Network configuration - can be 'base-sepolia' or 'base'
 // Default to mainnet for production
 const NETWORK = process.env.NEXT_PUBLIC_NETWORK || 'base';
@@ -249,11 +253,14 @@ export async function GET(request) {
     // Create Thirdweb client
     const client = createThirdwebClient({ secretKey: thirdwebSecretKey });
 
-    // Create Thirdweb facilitator
+    // Create Thirdweb facilitator with funded server wallet
+    // The server wallet must have ETH for gas fees to execute settlements
     const thirdwebFacilitator = facilitator({
       client,
-      serverWalletAddress: MERCHANT_ADDRESS,
+      serverWalletAddress: SERVER_WALLET_ADDRESS,
     });
+
+    console.log('Facilitator configured with server wallet:', SERVER_WALLET_ADDRESS);
 
     // Determine chain (Base or Base Sepolia)
     const chain = network.isMainnet ? base : baseSepolia;
