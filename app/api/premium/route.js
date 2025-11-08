@@ -108,6 +108,11 @@ const USDC_ADDRESSES = {
   'base:8453': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base mainnet (chainId format)
 };
 
+const USDC_METADATA = {
+  'base-sepolia': { name: 'USDC', version: '2' },
+  'base': { name: 'USD Coin', version: '2' },
+};
+
 // Payment amount: 0.1 USDC = 100000 (USDC has 6 decimals)
 // Can be overridden with PAYMENT_AMOUNT environment variable
 const PAYMENT_AMOUNT = parseInt(process.env.PAYMENT_AMOUNT || '100000'); // Default: 0.1 USDC
@@ -150,6 +155,7 @@ const buildResourceUrl = (request) => {
 
 const buildPaymentConfig = (request) => {
   const { isMainnet, x402Network, displayNetwork, networkName, usdcAddress } = resolveNetworkConfig();
+  const usdcMetadata = USDC_METADATA[x402Network] ?? { name: 'USD Coin', version: '2' };
   const resourceUrl = buildResourceUrl(request);
   const amountString = PAYMENT_AMOUNT.toString();
 
@@ -164,8 +170,8 @@ const buildPaymentConfig = (request) => {
     maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
     asset: usdcAddress,
     extra: {
-      name: 'USD Coin',
-      version: '2',
+      name: usdcMetadata.name,
+      version: usdcMetadata.version,
       primaryType: 'TransferWithAuthorization',
       recipientAddress: MERCHANT_ADDRESS,
     },

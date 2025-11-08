@@ -49,8 +49,9 @@
 import { useState } from 'react';
 import { useAccount, useConnect, useDisconnect, useSwitchChain, useWalletClient } from 'wagmi';
 import { base, baseSepolia } from 'wagmi/chains';
-import { createThirdwebClient, createWalletAdapter } from 'thirdweb';
+import { createThirdwebClient } from 'thirdweb';
 import { wrapFetchWithPayment } from 'thirdweb/x402';
+import { viemAdapter } from 'thirdweb/adapters/viem';
 
 // Create Thirdweb client (using client ID from environment)
 const getThirdwebClient = () => {
@@ -198,14 +199,26 @@ export default function Home() {
       const { base: thirdwebBase, baseSepolia: thirdwebBaseSepolia } = await import('thirdweb/chains');
       const thirdwebChain = targetNetwork.id === baseSepolia.id ? thirdwebBaseSepolia : thirdwebBase;
 
-      // Create Thirdweb wallet adapter from wagmi wallet client
-      const thirdwebWallet = createWalletAdapter({
+      // Convert wagmi wallet client to Thirdweb account using viemAdapter
+      console.log('Converting wagmi wallet client to thirdweb wallet...');
+      const thirdwebWallet = viemAdapter.wallet.fromViem({
+        walletClient,
+      });
+
+      await thirdwebWallet.autoConnect({
         client: thirdwebClient,
-        adaptedAccount: walletClient,
         chain: thirdwebChain,
       });
 
+      const connectedAccount = thirdwebWallet.getAccount();
+      if (!connectedAccount) {
+        throw new Error('Failed to derive account from connected wallet.');
+      }
+
+      console.log('✅ Wallet ready:', connectedAccount.address);
+
       // Wrap fetch with payment capability (max 1 USDC)
+      // Note: wrapFetchWithPayment accepts either a Wallet or an Account
       const fetchWithPayment = wrapFetchWithPayment(
         fetch,
         thirdwebClient,
