@@ -50,7 +50,25 @@ import { useState } from 'react';
 import { useAccount, useConnect, useDisconnect, useSwitchChain, useWalletClient } from 'wagmi';
 import { base, baseSepolia } from 'wagmi/chains';
 import { createPaymentHeader } from 'x402/client';
-import { parseUnits } from 'viem';
+
+const normalizeNetworkForSdk = (network) => {
+  if (!network) return network;
+  const value = network.toString().toLowerCase();
+
+  if (value === 'base' || value === 'base-sepolia') {
+    return value;
+  }
+
+  if (value.includes('8453')) {
+    return 'base';
+  }
+
+  if (value.includes('84532')) {
+    return 'base-sepolia';
+  }
+
+  return value;
+};
 
 export default function Home() {
   // Wagmi hooks for wallet connection
@@ -193,29 +211,46 @@ export default function Home() {
         throw new Error('Payment requirements not found in API response.');
       }
 
-      // CRITICAL: Use the EXACT network format from the 402 response
-      // Do NOT convert it! The facilitator expects the exact same format
-      // that was sent in the 402 response (e.g., "eip155:8453")
+      // Get payment requirements from 402 response
       const paymentRequirements = { ...paymentInfo.x402Requirements };
-
-      console.log('Creating payment with requirements:', JSON.stringify(paymentRequirements, null, 2));
-
-      // Use x402.org facilitator for creating the payment
-      const facilitatorUrl = 'https://x402.org/facilitator';
-
-      console.log('Facilitator URL:', facilitatorUrl);
-      console.log('Network:', paymentRequirements.network);
 
       if (!paymentRequirements.resource) {
         throw new Error('Payment requirements missing resource field.');
       }
+
+      console.log('Original payment requirements (from 402):', JSON.stringify(paymentRequirements, null, 2));
+
+      // CRITICAL FIX: createPaymentHeader() only accepts simplified network formats
+      // But the backend expects EIP-155 format for verification
+      // Solution: Convert for createPaymentHeader, but keep original in the signed payload
+      const normalizedNetworkForCreation = normalizeNetworkForSdk(paymentRequirements.network);
+
+      console.log('Network normalization:', {
+        original: paymentRequirements.network,
+        normalized: normalizedNetworkForCreation,
+      });
+
+      const requirementsForCreation = {
+        ...paymentRequirements,
+        network: normalizedNetworkForCreation
+      };
+
+      console.log('Network conversion:', {
+        original: paymentRequirements.network,
+        simplified: normalizedNetworkForCreation
+      });
+
+      // Use x402.org facilitator for creating the payment
+      const facilitatorUrl = 'https://x402.org/facilitator';
+
+      console.log('Creating payment header with simplified network:', normalizedNetworkForCreation);
 
       // Create payment header using x402/client
       // This creates an EIP-3009 authorization signature
       const paymentHeader = await createPaymentHeader(
         walletClient,
         1, // x402Version
-        paymentRequirements,
+        requirementsForCreation, // Use simplified network for creation
         { facilitatorUrl }
       );
 
@@ -257,7 +292,38 @@ export default function Home() {
         console.error('=== PAYMENT VERIFICATION FAILED (402 Response) ===');
         console.error('Server response:', JSON.stringify(data, null, 2));
 
-        setError(data.errorMessage || data.message || 'Payment verification failed');
+        const errorReason = data.error || data.errorReason;
+        let errorMessage = data.errorMessage || data.message || 'Payment verification failed';
+
+        if (errorReason === 'invalid_exact_evm_payload_signature') {
+          errorMessage = 'Facilitator rejected the payment signature. Refresh the payment request and re-sign in your wallet.';
+        }
+
+        setError(errorMessage);
+        setPaymentInfo((prev) => {
+          if (!Array.isArray(data.accepts) || data.accepts.length === 0) {
+            return prev;
+          }
+
+          const updatedRequirements = data.accepts[0];
+
+          if (!prev) {
+            return {
+              amount: '',
+              token: '',
+              recipient: '',
+              network: '',
+              networkName: '',
+              description: '',
+              x402Requirements: updatedRequirements,
+            };
+          }
+
+          return {
+            ...prev,
+            x402Requirements: updatedRequirements,
+          };
+        });
         setStatus('error');
       } else {
         throw new Error(`Unexpected status: ${response.status}`);

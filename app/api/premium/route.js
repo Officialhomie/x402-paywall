@@ -102,12 +102,94 @@ const USDC_ADDRESSES = {
   'base:8453': '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', // Base mainnet (chainId format)
 };
 
-// Default to testnet USDC
-const USDC_ADDRESS = USDC_ADDRESSES[NETWORK] || USDC_ADDRESSES['base-sepolia'];
-
 // Payment amount: 0.1 USDC = 100000 (USDC has 6 decimals)
 // Can be overridden with PAYMENT_AMOUNT environment variable
 const PAYMENT_AMOUNT = parseInt(process.env.PAYMENT_AMOUNT || '100000'); // Default: 0.1 USDC
+
+const PAYMENT_DESCRIPTION = 'Access to premium video content';
+const PAYMENT_MIME_TYPE = 'video/mp4';
+const PAYMENT_TIMEOUT_SECONDS = 86400; // 24 hours - aligns with x402 defaults
+
+const MAINNET_ALIASES = ['base', 'base:8453', 'eip155:8453'];
+
+const normalizeAddress = (address) => (address || '').toLowerCase();
+
+const resolveNetworkConfig = (networkInput = NETWORK) => {
+  const normalized = (networkInput || '').toLowerCase();
+  const isMainnet = MAINNET_ALIASES.includes(normalized);
+  const x402Network = isMainnet ? 'base' : 'base-sepolia';
+  const displayNetwork = isMainnet ? 'base:8453' : 'base:84532';
+  const networkName = isMainnet ? 'Base' : 'Base Sepolia';
+  const usdcAddress = USDC_ADDRESSES[isMainnet ? 'base' : 'base-sepolia'];
+
+  return {
+    isMainnet,
+    x402Network,
+    displayNetwork,
+    networkName,
+    usdcAddress,
+  };
+};
+
+const buildResourceUrl = (request) => {
+  if (request?.url) {
+    const requestUrlObj = new URL(request.url);
+    const normalizedPathname = requestUrlObj.pathname.replace(/\/$/, '');
+    return `${requestUrlObj.origin}${normalizedPathname}`;
+  }
+
+  const fallbackBase = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+  return `${fallbackBase.replace(/\/$/, '')}/api/premium`;
+};
+
+const buildPaymentConfig = (request) => {
+  const { isMainnet, x402Network, displayNetwork, networkName, usdcAddress } = resolveNetworkConfig();
+  const resourceUrl = buildResourceUrl(request);
+  const amountString = PAYMENT_AMOUNT.toString();
+
+  const x402Requirements = {
+    scheme: 'exact',
+    network: x402Network,
+    maxAmountRequired: amountString,
+    resource: resourceUrl,
+    description: PAYMENT_DESCRIPTION,
+    mimeType: PAYMENT_MIME_TYPE,
+    payTo: MERCHANT_ADDRESS,
+    maxTimeoutSeconds: PAYMENT_TIMEOUT_SECONDS,
+    asset: usdcAddress,
+    extra: {
+      name: 'USD Coin',
+      version: '2',
+      primaryType: 'TransferWithAuthorization',
+      recipientAddress: MERCHANT_ADDRESS,
+    },
+  };
+
+  const payment = {
+    scheme: 'exact',
+    network: displayNetwork,
+    networkName,
+    token: usdcAddress,
+    recipient: MERCHANT_ADDRESS,
+    amount: amountString,
+    displayAmount: `${(PAYMENT_AMOUNT / 1_000_000).toFixed(6)} USDC`,
+    description: PAYMENT_DESCRIPTION,
+    x402Requirements,
+  };
+
+  return {
+    resourceUrl,
+    network: {
+      isMainnet,
+      displayNetwork,
+      networkName,
+      x402Network,
+      usdcAddress,
+    },
+    payment,
+    x402Requirements,
+  };
+};
 
 /**
  * GET /api/premium
@@ -125,6 +207,9 @@ const PAYMENT_AMOUNT = parseInt(process.env.PAYMENT_AMOUNT || '100000'); // Defa
  * @returns {NextResponse} - Either 402 (payment required) or 200 (access granted)
  */
 export async function GET(request) {
+  const paymentConfig = buildPaymentConfig(request);
+  const { payment, x402Requirements, network } = paymentConfig;
+
   // STEP 1: Check for X-PAYMENT header
   // This header contains the signed payment proof from the facilitator
   const xPaymentHeader = request.headers.get('x-payment');
@@ -132,67 +217,12 @@ export async function GET(request) {
   // STEP 2: If no payment header, return 402 Payment Required
   // This tells the client what payment is needed
   if (!xPaymentHeader) {
-    // Determine network from environment or default to testnet
-    const isMainnet = NETWORK === 'base' || NETWORK === 'base:8453';
-    const networkChainId = isMainnet ? 'base:8453' : 'base:84532';
-    const networkName = isMainnet ? 'Base' : 'Base Sepolia';
-    const usdcAddress = isMainnet ? USDC_ADDRESSES['base'] : USDC_ADDRESSES['base-sepolia'];
-    
-    // Build payment requirements object
-    // Include both simplified format for display AND full x402 format for payment creation
-    // CRITICAL: Thirdweb facilitator expects network in EIP-155 format: "eip155:8453" or "eip155:84532"
-    const networkNameForX402 = isMainnet ? 'eip155:8453' : 'eip155:84532';
-    
-    // CRITICAL: Use the request URL to construct resource URL to ensure exact match
-    // This ensures the resource URL in x402Requirements matches what we'll use for verification
-    let resourceUrl;
-    if (request.url) {
-      // Parse the request URL and use it directly
-      const requestUrlObj = new URL(request.url);
-      resourceUrl = `${requestUrlObj.origin}${requestUrlObj.pathname}`;
-    } else {
-      // Fallback to environment variable or default
-      resourceUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/premium`;
-    }
-    
-    // Remove trailing slash if present to ensure exact match
-    resourceUrl = resourceUrl.replace(/\/$/, '');
-    
-    const paymentRequirement = {
-      // Simplified fields for display (backwards compatibility)
-      scheme: 'exact',
-      network: networkChainId, // Network: base (8453) or base-sepolia (84532)
-      token: usdcAddress, // USDC token contract address
-      recipient: MERCHANT_ADDRESS, // Your wallet address to receive payments
-      amount: PAYMENT_AMOUNT.toString(), // Amount in smallest unit (6 decimals for USDC)
-      displayAmount: `${(PAYMENT_AMOUNT / 1000000).toFixed(6)} USDC`,
-      networkName: networkName,
-      description: 'Access to premium video content',
-      
-      // Full x402 payment requirements (for createPaymentHeader)
-      // CRITICAL: Use EIP-155 network format for Thirdweb facilitator compatibility
-      x402Requirements: {
-        scheme: 'exact',
-        network: networkNameForX402, // Thirdweb expects "eip155:8453" or "eip155:84532"
-        maxAmountRequired: PAYMENT_AMOUNT.toString(),
-        resource: resourceUrl,
-        description: 'Access to premium video content',
-        mimeType: 'video/mp4',
-        payTo: MERCHANT_ADDRESS,
-        maxTimeoutSeconds: 86400, // 24 hours - must match Thirdweb facilitator default
-        asset: usdcAddress,
-      }
-    };
-
-    // Return HTTP 402 Payment Required in x402 standard format
-    // The Thirdweb API expects payment requirements at the root level, not nested
-    // This follows the x402 specification for 402 responses
     return NextResponse.json(
       {
         x402Version: 1,
-        ...paymentRequirement.x402Requirements, // Spread x402Requirements at root level for Thirdweb API
-        // Also include the full payment object for backward compatibility with our frontend
-        payment: paymentRequirement,
+        ...x402Requirements,
+        accepts: [x402Requirements],
+        payment,
       },
       { status: 402 } // HTTP 402 Payment Required
     );
@@ -210,7 +240,7 @@ export async function GET(request) {
     console.log('Payment Amount:', PAYMENT_AMOUNT);
 
     // Validate environment configuration
-    if (!MERCHANT_ADDRESS || MERCHANT_ADDRESS === '0x0000000000000000000000000000000000000000') {
+    if (!MERCHANT_ADDRESS || normalizeAddress(MERCHANT_ADDRESS) === '0x0000000000000000000000000000000000000000') {
       console.error('❌ MERCHANT_ADDRESS is not set or invalid');
       return NextResponse.json(
         {
@@ -221,57 +251,84 @@ export async function GET(request) {
       );
     }
 
-    // Determine network configuration
-    const isMainnet = NETWORK === 'base' || NETWORK === 'base:8453';
-    const usdcAddress = isMainnet ? USDC_ADDRESSES['base'] : USDC_ADDRESSES['base-sepolia'];
-
-    // Build resource URL from request
-    let resourceUrl;
-    if (request.url) {
-      const requestUrlObj = new URL(request.url);
-      resourceUrl = `${requestUrlObj.origin}${requestUrlObj.pathname}`;
-    } else {
-      resourceUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/premium`;
+    if (paymentPayload.network !== x402Requirements.network) {
+      return NextResponse.json(
+        {
+          x402Version: 1,
+          error: 'invalid_network',
+          errorMessage: `Expected payment on ${x402Requirements.network} but received ${paymentPayload.network}`,
+          accepts: [x402Requirements],
+        },
+        { status: 402 }
+      );
     }
-    resourceUrl = resourceUrl.replace(/\/$/, '');
 
-    // Build payment requirements that match what was sent in the 402 response
-    const paymentRequirements = {
-      scheme: 'exact',
-      network: paymentPayload.network, // Use network from payment payload
-      asset: usdcAddress,
-      payTo: MERCHANT_ADDRESS,
-      maxAmountRequired: PAYMENT_AMOUNT.toString(),
-      resource: resourceUrl,
-      description: 'Access to premium video content',
-      mimeType: 'video/mp4',
-      maxTimeoutSeconds: 86400,
-      extra: {
-        name: 'USD Coin',
-        version: '2',
-        primaryType: 'TransferWithAuthorization',
-        recipientAddress: MERCHANT_ADDRESS,
-      }
-    };
+    const authorization = paymentPayload?.payload?.authorization;
+
+    if (!authorization) {
+      return NextResponse.json(
+        {
+          x402Version: 1,
+          error: 'invalid_payment',
+          errorMessage: 'Missing authorization data in payment payload.',
+          accepts: [x402Requirements],
+        },
+        { status: 402 }
+      );
+    }
+
+    const expectedRecipient = normalizeAddress(MERCHANT_ADDRESS);
+    const payloadRecipient = normalizeAddress(authorization.to);
+
+    if (payloadRecipient !== expectedRecipient) {
+      return NextResponse.json(
+        {
+          x402Version: 1,
+          error: 'invalid_exact_evm_payload_recipient_mismatch',
+          errorMessage: 'Payment authorization recipient does not match the merchant address.',
+          accepts: [x402Requirements],
+        },
+        { status: 402 }
+      );
+    }
+
+    if (authorization.value !== x402Requirements.maxAmountRequired) {
+      return NextResponse.json(
+        {
+          x402Version: 1,
+          error: 'invalid_exact_evm_payload_authorization_value',
+          errorMessage: 'Payment amount did not match the required value.',
+          accepts: [x402Requirements],
+        },
+        { status: 402 }
+      );
+    }
 
     // Use the facilitator to verify and settle payment
     // Default to x402.org facilitator
     const facilitatorUrl = process.env.FACILITATOR_URL || 'https://x402.org/facilitator';
 
     console.log('Using facilitator:', facilitatorUrl);
-    console.log('Payment requirements:', JSON.stringify(paymentRequirements, null, 2));
+    console.log('Payment requirements:', JSON.stringify(x402Requirements, null, 2));
 
     // Call facilitator /settle endpoint
     // This combines verification and settlement in one call
+    const facilitatorHeaders = {
+      'Content-Type': 'application/json',
+    };
+
+    const thirdwebSecretKey = process.env.THIRDWEB_SECRET_KEY;
+    if (thirdwebSecretKey) {
+      facilitatorHeaders['Authorization'] = `Bearer ${thirdwebSecretKey}`;
+    }
+
     const facilitatorResponse = await fetch(`${facilitatorUrl}/settle`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: facilitatorHeaders,
       body: JSON.stringify({
         x402Version: paymentPayload.x402Version || 1,
         paymentPayload: paymentPayload,
-        paymentRequirements: paymentRequirements,
+        paymentRequirements: x402Requirements,
       }),
     });
 
@@ -290,7 +347,7 @@ export async function GET(request) {
           x402Version: 1,
           error: facilitatorData.errorReason || 'payment_settlement_failed',
           errorMessage: facilitatorData.errorReason || 'Payment settlement failed. Please try again.',
-          accepts: [paymentRequirements],
+          accepts: [x402Requirements],
         },
         { status: 402 }
       );
@@ -345,7 +402,7 @@ export async function GET(request) {
           'Accept-Ranges': 'bytes',
           'Cache-Control': 'private, no-cache',
           'X-Payment-Verified': 'true',
-          'X-Payment-Network': NETWORK,
+          'X-Payment-Network': network.x402Network,
         },
       });
     } catch (fileError) {
@@ -373,7 +430,8 @@ export async function GET(request) {
       {
         error: 'Payment verification error',
         message: error.message || 'Failed to verify payment. Please try again.',
-        hint: 'The facilitator service may be temporarily unavailable.'
+        hint: 'The facilitator service may be temporarily unavailable.',
+        accepts: [x402Requirements],
       },
       { status: 402 }
     );
