@@ -253,11 +253,26 @@ export async function GET(request) {
     // Create Thirdweb client
     const client = createThirdwebClient({ secretKey: thirdwebSecretKey });
 
+    // Get vault access token for server wallet authentication
+    const vaultAccessToken = process.env.THIRDWEB_VAULT_ACCESS_TOKEN;
+
+    if (!vaultAccessToken) {
+      console.error('❌ THIRDWEB_VAULT_ACCESS_TOKEN not configured');
+      return NextResponse.json(
+        {
+          error: 'Server configuration error',
+          message: 'Wallet access credentials not configured.'
+        },
+        { status: 500 }
+      );
+    }
+
     // Create Thirdweb facilitator with funded server wallet
     // The server wallet must have ETH for gas fees to execute settlements
     const thirdwebFacilitator = facilitator({
       client,
       serverWalletAddress: SERVER_WALLET_ADDRESS,
+      vaultAccessToken: vaultAccessToken,
     });
 
     console.log('Facilitator configured with server wallet:', SERVER_WALLET_ADDRESS);
