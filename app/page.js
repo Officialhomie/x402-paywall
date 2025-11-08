@@ -49,25 +49,16 @@
 import { useState } from 'react';
 import { useAccount, useConnect, useDisconnect, useSwitchChain, useWalletClient } from 'wagmi';
 import { base, baseSepolia } from 'wagmi/chains';
-import { createPaymentHeader } from 'x402/client';
+import { createThirdwebClient, createWalletAdapter } from 'thirdweb';
+import { wrapFetchWithPayment } from 'thirdweb/x402';
 
-const normalizeNetworkForSdk = (network) => {
-  if (!network) return network;
-  const value = network.toString().toLowerCase();
-
-  if (value === 'base' || value === 'base-sepolia') {
-    return value;
+// Create Thirdweb client (using client ID from environment)
+const getThirdwebClient = () => {
+  const clientId = process.env.NEXT_PUBLIC_THIRDWEB_CLIENT_ID;
+  if (!clientId) {
+    throw new Error('NEXT_PUBLIC_THIRDWEB_CLIENT_ID not configured');
   }
-
-  if (value.includes('8453')) {
-    return 'base';
-  }
-
-  if (value.includes('84532')) {
-    return 'base-sepolia';
-  }
-
-  return value;
+  return createThirdwebClient({ clientId });
 };
 
 export default function Home() {
@@ -148,24 +139,20 @@ export default function Home() {
   };
 
   /**
-   * STEP 3 & 4: Process payment and get proof
-   * 
-   * Real implementation using wagmi and x402:
-   * 1. Connect user's wallet if not connected
-   * 2. Switch to Base Sepolia network if needed
-   * 3. Use x402's createPaymentHeader which handles:
-   *    - Creating USDC transfer transaction
-   *    - Signing with wallet
-   *    - Sending to blockchain
-   *    - Getting payment proof from facilitator
-   * 4. Retry request with X-PAYMENT header
+   * STEP 3 & 4: Process payment using Thirdweb's wrapFetchWithPayment
+   *
+   * This implementation uses Thirdweb's x402 SDK which:
+   * 1. Automatically detects 402 Payment Required responses
+   * 2. Parses payment requirements
+   * 3. Creates and signs payment authorization with user's wallet
+   * 4. Retries request with payment credentials
+   * 5. Returns successful response
    */
   const handleProcessPayment = async () => {
     setStatus('processing');
     setStep(3);
-    
+
     try {
-      // Main try block for payment processing
       // STEP 1: Ensure wallet is connected
       if (!isConnected) {
         // Connect to the first available connector
@@ -179,13 +166,11 @@ export default function Home() {
       }
 
       // STEP 2: Ensure we're on the correct network (Base or Base Sepolia)
-      // Determine target network from payment requirements
-      // Payment info uses "base:84532" or "base:8453" format, convert to wagmi chain
-      const networkString = paymentInfo.network || 'base:84532';
-      const targetNetwork = networkString === 'base:84532' || networkString.includes('84532') || networkString === 'base-sepolia'
-        ? baseSepolia 
+      const networkString = paymentInfo?.network || process.env.NEXT_PUBLIC_NETWORK || 'base-sepolia';
+      const targetNetwork = networkString.includes('84532') || networkString.includes('sepolia')
+        ? baseSepolia
         : base;
-      
+
       if (chainId !== targetNetwork.id) {
         setStatus('processing');
         setError(null);
@@ -203,66 +188,37 @@ export default function Home() {
         throw new Error('Wallet client not available. Please try connecting your wallet again.');
       }
 
-      // STEP 4: Create payment authorization using x402/client
+      // STEP 4: Create Thirdweb client and wrap fetch with payment capability
       setStep(4);
+      console.log('🔧 Setting up Thirdweb x402 payment wrapper...');
 
-      // Validate payment requirements
-      if (!paymentInfo.x402Requirements) {
-        throw new Error('Payment requirements not found in API response.');
-      }
+      const thirdwebClient = getThirdwebClient();
 
-      // Get payment requirements from 402 response
-      const paymentRequirements = { ...paymentInfo.x402Requirements };
+      // Import thirdweb chains
+      const { base: thirdwebBase, baseSepolia: thirdwebBaseSepolia } = await import('thirdweb/chains');
+      const thirdwebChain = targetNetwork.id === baseSepolia.id ? thirdwebBaseSepolia : thirdwebBase;
 
-      if (!paymentRequirements.resource) {
-        throw new Error('Payment requirements missing resource field.');
-      }
-
-      console.log('Original payment requirements (from 402):', JSON.stringify(paymentRequirements, null, 2));
-
-      // CRITICAL FIX: createPaymentHeader() only accepts simplified network formats
-      // But the backend expects EIP-155 format for verification
-      // Solution: Convert for createPaymentHeader, but keep original in the signed payload
-      const normalizedNetworkForCreation = normalizeNetworkForSdk(paymentRequirements.network);
-
-      console.log('Network normalization:', {
-        original: paymentRequirements.network,
-        normalized: normalizedNetworkForCreation,
+      // Create Thirdweb wallet adapter from wagmi wallet client
+      const thirdwebWallet = createWalletAdapter({
+        client: thirdwebClient,
+        adaptedAccount: walletClient,
+        chain: thirdwebChain,
       });
 
-      const requirementsForCreation = {
-        ...paymentRequirements,
-        network: normalizedNetworkForCreation
-      };
-
-      console.log('Network conversion:', {
-        original: paymentRequirements.network,
-        simplified: normalizedNetworkForCreation
-      });
-
-      // Use x402.org facilitator for creating the payment
-      const facilitatorUrl = 'https://x402.org/facilitator';
-
-      console.log('Creating payment header with simplified network:', normalizedNetworkForCreation);
-
-      // Create payment header using x402/client
-      // This creates an EIP-3009 authorization signature
-      const paymentHeader = await createPaymentHeader(
-        walletClient,
-        1, // x402Version
-        requirementsForCreation, // Use simplified network for creation
-        { facilitatorUrl }
+      // Wrap fetch with payment capability (max 1 USDC)
+      const fetchWithPayment = wrapFetchWithPayment(
+        fetch,
+        thirdwebClient,
+        thirdwebWallet,
+        BigInt(1 * 10 ** 6) // Max 1 USDC
       );
 
-      console.log('✅ Payment header created (length):', paymentHeader.length);
+      console.log('✅ Thirdweb payment wrapper ready');
+      console.log('💳 Making payment request to /api/premium...');
 
-      // STEP 5: Send to server for verification and settlement
-      console.log('Sending payment header to backend for verification...');
-      const response = await fetch('/api/premium', {
-        headers: {
-          'X-PAYMENT': paymentHeader
-        }
-      });
+      // STEP 5: Use wrapped fetch - it will automatically handle the 402 flow
+      // First call will get 402, wrapper will sign payment, retry with X-PAYMENT header
+      const response = await fetchWithPayment('/api/premium');
 
       console.log('Backend response status:', response.status);
 
